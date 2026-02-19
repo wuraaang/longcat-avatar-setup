@@ -23,8 +23,10 @@ err() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 # --- Auto-detect ComfyUI path ---
 if [ -n "${COMFYUI_DIR:-}" ]; then
     : # User override
+elif [ -d "/workspace/runpod-slim/ComfyUI" ]; then
+    COMFYUI_DIR="/workspace/runpod-slim/ComfyUI" # RunPod official (comfyui-base)
 elif [ -d "/workspace/madapps/ComfyUI" ]; then
-    COMFYUI_DIR="/workspace/madapps/ComfyUI"    # RunPod official template
+    COMFYUI_DIR="/workspace/madapps/ComfyUI"     # RunPod legacy template
 elif [ -d "/workspace/ComfyUI" ]; then
     COMFYUI_DIR="/workspace/ComfyUI"             # Community templates
 elif [ -d "/root/ComfyUI" ]; then
