@@ -2,29 +2,26 @@
 set -euo pipefail
 
 # ============================================================
-# 🐱 LongCat Avatar — RunPod Setup
+# 🐱 LongCat Avatar — RunPod Setup (FAST)
 # For use with RunPod comfyui-base (runpod-slim) template
-# 
-# Lessons applied from bebop-studio-workspace:
-#   - Auto-detect correct ComfyUI path (runpod-slim first!)
-#   - Verify running ComfyUI process matches our path
-#   - Don't use aria2c for HF downloads (403 on redirects)
-#   - Validate install at the end (don't just clone and pray)
-#   - Use absolute paths everywhere (no dirname $0 fragility)
+#
+# Downloads only what's needed for single-avatar talking head:
+#   - avatar_single (~63GB) — NOT avatar_multi
+#   - Base model VAE + text encoder (~18GB)
+#   - Audio models (~1.5GB)
+#
+# Uses aria2c x16 parallel connections for speed.
+# Lesson from bebop: resolve HF redirects first, then aria2c.
 # ============================================================
 
-echo "🐱 LongCat Avatar Setup — Starting..."
+echo "🐱 LongCat Avatar Setup (FAST) — Starting..."
 START_TIME=$(date +%s)
 
-# --- Resolve script dir (absolute, not relative) ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARIA2_CONNECTIONS=16
 
 # --- Colors ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log() { echo -e "${GREEN}[✓]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
@@ -39,55 +36,48 @@ echo "  Step 0/5 — Detecting ComfyUI"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ -n "${COMFYUI_DIR:-}" ]; then
-    log "Using user override: $COMFYUI_DIR"
+    log "User override: $COMFYUI_DIR"
 elif [ -d "/workspace/runpod-slim/ComfyUI" ]; then
-    COMFYUI_DIR="/workspace/runpod-slim/ComfyUI" # RunPod official (comfyui-base)
+    COMFYUI_DIR="/workspace/runpod-slim/ComfyUI"
 elif [ -d "/workspace/madapps/ComfyUI" ]; then
-    COMFYUI_DIR="/workspace/madapps/ComfyUI"     # RunPod legacy template
+    COMFYUI_DIR="/workspace/madapps/ComfyUI"
 elif [ -d "/workspace/ComfyUI" ]; then
-    COMFYUI_DIR="/workspace/ComfyUI"             # Community templates
+    COMFYUI_DIR="/workspace/ComfyUI"
 elif [ -d "/root/ComfyUI" ]; then
-    COMFYUI_DIR="/root/ComfyUI"                  # GPUhub / manual install
+    COMFYUI_DIR="/root/ComfyUI"
 else
-    err "ComfyUI not found! Set COMFYUI_DIR manually:\n  COMFYUI_DIR=/path/to/ComfyUI bash setup-runpod.sh"
+    err "ComfyUI not found! Set COMFYUI_DIR manually."
 fi
 
-# Lesson from bebop: verify the RUNNING ComfyUI matches our detected path
+# Verify running process matches (lesson from bebop)
 COMFYUI_PID=$(pgrep -f "main.py.*--listen" 2>/dev/null | head -1 || true)
 if [ -n "$COMFYUI_PID" ]; then
     RUNNING_CWD=$(readlink -f /proc/$COMFYUI_PID/cwd 2>/dev/null || true)
     if [ -n "$RUNNING_CWD" ] && [ "$RUNNING_CWD" != "$COMFYUI_DIR" ]; then
-        warn "Running ComfyUI is at $RUNNING_CWD but we detected $COMFYUI_DIR"
-        warn "Switching to running instance path!"
+        warn "Running ComfyUI at $RUNNING_CWD — switching!"
         COMFYUI_DIR="$RUNNING_CWD"
     fi
 fi
 
 CUSTOM_NODES_DIR="$COMFYUI_DIR/custom_nodes"
 MODELS_DIR="$COMFYUI_DIR/models"
-HF_MIRROR="${HF_MIRROR:-}"
-
-log "ComfyUI path: $COMFYUI_DIR"
-[ -n "$COMFYUI_PID" ] && log "ComfyUI running (PID: $COMFYUI_PID)" || warn "ComfyUI not running — you'll need to start it after setup"
+HF_MIRROR="${HF_MIRROR:-https://huggingface.co}"
+log "ComfyUI: $COMFYUI_DIR"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Step 1 — Dependencies
+#  Step 1 — Dependencies + aria2c
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Step 1/5 — Extra dependencies"
+echo "  Step 1/5 — Dependencies"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# System deps
-apt-get update -qq 2>/dev/null && apt-get install -y -qq ffmpeg libsndfile1 > /dev/null 2>&1 || warn "apt install skipped (may already be present)"
-
-# Python deps — pin versions to avoid conflicts with existing ComfyUI env
-pip install librosa soundfile "huggingface_hub[cli]" -q 2>&1 | tail -1 || true
-
-# Verify critical deps actually imported
-python3 -c "import librosa; import soundfile" 2>/dev/null || err "Failed to import librosa/soundfile — Python env issue"
-log "Audio & HF dependencies installed"
+apt-get update -qq 2>/dev/null && apt-get install -y -qq ffmpeg libsndfile1 aria2 > /dev/null 2>&1 || warn "apt skipped"
+pip install librosa soundfile einops -q 2>&1 | tail -1 || true
+python3 -c "import librosa; import soundfile" 2>/dev/null || err "librosa/soundfile import failed"
+command -v aria2c &>/dev/null || err "aria2c not installed"
+log "All deps ready (aria2c + audio + ffmpeg)"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Step 2 — Kijai WanVideoWrapper
@@ -103,90 +93,177 @@ WRAPPER_DIR="$CUSTOM_NODES_DIR/ComfyUI-WanVideoWrapper"
 if [ -d "$WRAPPER_DIR" ]; then
     cd "$WRAPPER_DIR"
     git fetch origin 2>/dev/null
-    # Check if longcat_avatar branch exists remotely
     if git branch -r 2>/dev/null | grep -q "origin/longcat_avatar"; then
         git checkout longcat_avatar 2>/dev/null || git checkout -b longcat_avatar origin/longcat_avatar
         git pull origin longcat_avatar 2>/dev/null
-        log "WanVideoWrapper switched to longcat_avatar branch"
+        log "WanVideoWrapper → longcat_avatar branch"
     else
-        warn "longcat_avatar branch not found — it may have been merged into main"
-        git checkout main 2>/dev/null || true
-        git pull 2>/dev/null
-        log "WanVideoWrapper updated (main branch)"
+        git checkout main 2>/dev/null; git pull 2>/dev/null
+        warn "longcat_avatar branch not found — using main"
     fi
 else
-    # Try longcat_avatar branch first, fallback to main
     if git clone -b longcat_avatar https://github.com/kijai/ComfyUI-WanVideoWrapper.git "$WRAPPER_DIR" 2>/dev/null; then
-        log "WanVideoWrapper cloned (longcat_avatar branch)"
+        log "WanVideoWrapper cloned (longcat_avatar)"
     else
         git clone https://github.com/kijai/ComfyUI-WanVideoWrapper.git "$WRAPPER_DIR"
-        warn "Cloned main branch (longcat_avatar may be merged)"
+        warn "Cloned main branch"
     fi
 fi
 
 cd "$WRAPPER_DIR"
-if [ -f requirements.txt ]; then
-    pip install -r requirements.txt -q 2>&1 | tail -1 || true
-    log "Wrapper requirements installed"
-else
-    warn "No requirements.txt in wrapper"
-fi
-
-# Extra deps that Kijai's wrapper sometimes needs
-pip install einops -q 2>/dev/null || true
-
+[ -f requirements.txt ] && pip install -r requirements.txt -q 2>&1 | tail -1 || true
 log "WanVideoWrapper ready"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Step 3 — Model weights
+#  Step 3 — Download models (FAST)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Step 3/5 — Model weights"
+echo "  Step 3/5 — Model weights (aria2c x${ARIA2_CONNECTIONS})"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  ☕ This downloads ~55GB. Go grab a coffee..."
-echo ""
 
 LONGCAT_DIR="$MODELS_DIR/LongCat"
 mkdir -p "$LONGCAT_DIR"
 
-# Set HF mirror if specified (for China/Asia)
-if [ -n "$HF_MIRROR" ]; then
-    export HF_ENDPOINT="$HF_MIRROR"
-    log "Using HuggingFace mirror: $HF_MIRROR"
-fi
+# Fast download function: resolve HF redirect then aria2c x16
+# Lesson from bebop: aria2c chokes on redirects, resolve with curl first
+fast_download() {
+    local url="$1"
+    local dest_dir="$2"
+    local filename="$3"
+    local dest_path="${dest_dir}/${filename}"
+    local min_size="${4:-1000000}"  # minimum expected size in bytes
 
-# --- Download Avatar model ---
-download_hf_model() {
-    local repo="$1"
-    local dest="$2"
-    local label="$3"
-
-    if [ -d "$dest" ] && [ "$(find "$dest" -name '*.safetensors' -o -name '*.bin' -o -name '*.pt' 2>/dev/null | head -1)" ]; then
-        log "$label weights already present — skipping"
+    if [ -f "$dest_path" ] && [ "$(stat -c%s "$dest_path" 2>/dev/null || echo 0)" -gt "$min_size" ]; then
+        log "Already downloaded: $filename — skip"
         return 0
     fi
 
-    log "Downloading $label..."
-    mkdir -p "$dest"
+    mkdir -p "$dest_dir"
 
-    # huggingface-cli handles auth, resume, and retries properly
-    # (unlike aria2c which chokes on HF redirects — lesson from bebop)
-    if huggingface-cli download "$repo" --local-dir "$dest" --resume-download 2>&1; then
-        # Verify we actually got model files (not just README/config)
-        if [ "$(find "$dest" -name '*.safetensors' -o -name '*.bin' -o -name '*.pt' 2>/dev/null | wc -l)" -gt 0 ]; then
-            log "$label downloaded ✓ ($(du -sh "$dest" | cut -f1))"
-        else
-            err "$label download completed but no model files found! Check HuggingFace repo."
+    # Resolve redirect (lesson from bebop: HF/CivitAI redirects break aria2c)
+    local direct_url
+    direct_url=$(curl -sI -L -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null)
+    [ -z "$direct_url" ] && direct_url="$url"
+
+    if aria2c -x "${ARIA2_CONNECTIONS}" -s "${ARIA2_CONNECTIONS}" \
+        --max-connection-per-server="${ARIA2_CONNECTIONS}" \
+        --min-split-size=5M \
+        --file-allocation=none \
+        --console-log-level=warn \
+        --summary-interval=10 \
+        -d "$dest_dir" -o "$filename" \
+        "$direct_url" 2>&1; then
+
+        # Verify file size (lesson from bebop: truncated downloads)
+        local actual_size=$(stat -c%s "$dest_path" 2>/dev/null || echo 0)
+        if [ "$actual_size" -lt "$min_size" ]; then
+            warn "$filename is only $(numfmt --to=iec $actual_size) — possibly truncated!"
+            rm -f "$dest_path"
+            return 1
         fi
+        log "$filename ✓ ($(numfmt --to=iec $actual_size))"
     else
-        err "$label download failed! Check your network connection."
+        err "Download failed: $filename"
     fi
 }
 
-download_hf_model "meituan-longcat/LongCat-Video-Avatar" "$LONGCAT_DIR/LongCat-Video-Avatar" "LongCat-Video-Avatar"
-download_hf_model "meituan-longcat/LongCat-Video" "$LONGCAT_DIR/LongCat-Video" "LongCat-Video (base)"
+# Helper to build HF download URL
+HF_BASE="${HF_MIRROR}/meituan-longcat"
+
+echo ""
+echo "  📦 LongCat-Video-Avatar — avatar_single (~63GB, 6 shards)"
+echo ""
+
+AVATAR_DIR="$LONGCAT_DIR/LongCat-Video-Avatar/avatar_single"
+mkdir -p "$AVATAR_DIR"
+
+# Download the 6 shards in parallel (background jobs)
+for i in $(seq 1 6); do
+    padded=$(printf "%05d" $i)
+    fname="diffusion_pytorch_model-${padded}-of-00006.safetensors"
+    fast_download \
+        "${HF_BASE}/LongCat-Video-Avatar/resolve/main/avatar_single/${fname}" \
+        "$AVATAR_DIR" \
+        "$fname" \
+        "1000000000" &  # min 1GB
+done
+
+# Also download config + other small files in parallel
+for f in config.json model_index.json; do
+    fast_download \
+        "${HF_BASE}/LongCat-Video-Avatar/resolve/main/avatar_single/${f}" \
+        "$AVATAR_DIR" \
+        "$f" \
+        "100" &
+done
+
+# Download audio models
+echo ""
+echo "  📦 Audio models (~1.5GB)"
+echo ""
+
+AUDIO_DIR="$LONGCAT_DIR/LongCat-Video-Avatar/chinese-wav2vec2-base"
+mkdir -p "$AUDIO_DIR"
+fast_download "${HF_BASE}/LongCat-Video-Avatar/resolve/main/chinese-wav2vec2-base/chinese-wav2vec2-base-fairseq-ckpt.pt" "$AUDIO_DIR" "chinese-wav2vec2-base-fairseq-ckpt.pt" "500000000" &
+fast_download "${HF_BASE}/LongCat-Video-Avatar/resolve/main/chinese-wav2vec2-base/pytorch_model.bin" "$AUDIO_DIR" "pytorch_model.bin" "100000000" &
+
+# Config files from root
+for f in chinese-wav2vec2-base/config.json chinese-wav2vec2-base/preprocessor_config.json; do
+    bname=$(basename "$f")
+    fast_download "${HF_BASE}/LongCat-Video-Avatar/resolve/main/$f" "$AUDIO_DIR" "$bname" "100" &
+done
+
+# Vocal separator
+VOCAL_DIR="$LONGCAT_DIR/LongCat-Video-Avatar/vocal_separator"
+mkdir -p "$VOCAL_DIR"
+fast_download "${HF_BASE}/LongCat-Video-Avatar/resolve/main/vocal_separator/Kim_Vocal_2.onnx" "$VOCAL_DIR" "Kim_Vocal_2.onnx" "10000000" &
+
+echo ""
+echo "  ⏳ Waiting for avatar_single + audio downloads..."
+wait
+log "Avatar model downloads complete"
+
+echo ""
+echo "  📦 Base model — VAE + text encoder (~18GB)"
+echo ""
+
+# VAE (needed for decode)
+VAE_DIR="$LONGCAT_DIR/LongCat-Video/vae"
+mkdir -p "$VAE_DIR"
+fast_download "${HF_BASE}/LongCat-Video/resolve/main/vae/diffusion_pytorch_model.safetensors" "$VAE_DIR" "diffusion_pytorch_model.safetensors" "100000000" &
+fast_download "${HF_BASE}/LongCat-Video/resolve/main/vae/config.json" "$VAE_DIR" "config.json" "100" &
+
+# Text encoder (5 shards)
+TE_DIR="$LONGCAT_DIR/LongCat-Video/text_encoder"
+mkdir -p "$TE_DIR"
+for i in $(seq 1 5); do
+    padded=$(printf "%05d" $i)
+    fname="model-${padded}-of-00005.safetensors"
+    fast_download \
+        "${HF_BASE}/LongCat-Video/resolve/main/text_encoder/${fname}" \
+        "$TE_DIR" \
+        "$fname" \
+        "1000000000" &
+done
+
+# Text encoder config files
+for f in config.json model.safetensors.index.json; do
+    fast_download "${HF_BASE}/LongCat-Video/resolve/main/text_encoder/$f" "$TE_DIR" "$f" "100" &
+done
+
+# Tokenizer
+TOK_DIR="$LONGCAT_DIR/LongCat-Video/tokenizer"
+mkdir -p "$TOK_DIR"
+for f in spiece.model tokenizer.json tokenizer_config.json; do
+    fast_download "${HF_BASE}/LongCat-Video/resolve/main/tokenizer/$f" "$TOK_DIR" "$f" "100" &
+done
+
+echo ""
+echo "  ⏳ Waiting for base model downloads..."
+wait
+log "Base model downloads complete"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Step 4 — Workflows
@@ -194,31 +271,23 @@ download_hf_model "meituan-longcat/LongCat-Video" "$LONGCAT_DIR/LongCat-Video" "
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Step 4/5 — Workflows & Symlinks"
+echo "  Step 4/5 — Workflows"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-# Copy workflows from wrapper if available
 WORKFLOW_SRC="$WRAPPER_DIR/LongCat"
 if [ -d "$WORKFLOW_SRC" ]; then
     WORKFLOW_DST="$COMFYUI_DIR/user/default/workflows/LongCat"
     mkdir -p "$WORKFLOW_DST"
     cp -r "$WORKFLOW_SRC"/* "$WORKFLOW_DST/" 2>/dev/null || true
-    log "LongCat workflows copied to ComfyUI"
+    log "LongCat workflows copied"
 else
-    warn "No workflow files in wrapper — check Kijai's repo for example workflows"
+    warn "No workflows in wrapper — load manually from Kijai's repo"
 fi
 
-# Copy any workflows from this repo (absolute path, not relative)
-if [ -d "$SCRIPT_DIR/workflows" ]; then
-    WORKFLOW_DST="$COMFYUI_DIR/user/default/workflows/LongCat"
-    mkdir -p "$WORKFLOW_DST"
-    cp -v "$SCRIPT_DIR"/workflows/*.json "$WORKFLOW_DST/" 2>/dev/null && \
-        log "Local workflows copied" || true
-fi
+[ -d "$SCRIPT_DIR/workflows" ] && cp "$SCRIPT_DIR"/workflows/*.json "$COMFYUI_DIR/user/default/workflows/" 2>/dev/null && log "Local workflows copied" || true
 
-# Convenience symlink
 ln -sfn "$LONGCAT_DIR" "$COMFYUI_DIR/models/longcat"
-log "Symlink: models/longcat → $LONGCAT_DIR"
+log "Symlink: models/longcat"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Step 5 — Validation
@@ -231,75 +300,63 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 ERRORS=0
 
-# Check wrapper is in correct location
-if [ -d "$WRAPPER_DIR" ] && [ -f "$WRAPPER_DIR/__init__.py" ] || [ -f "$WRAPPER_DIR/nodes.py" ]; then
-    log "WanVideoWrapper: installed ✓"
-else
-    warn "WanVideoWrapper: missing __init__.py or nodes.py — may not load!"
-    ERRORS=$((ERRORS + 1))
-fi
+# Wrapper check
+[ -d "$WRAPPER_DIR" ] && ([ -f "$WRAPPER_DIR/__init__.py" ] || [ -f "$WRAPPER_DIR/nodes.py" ]) && \
+    log "WanVideoWrapper: OK ✓" || { warn "WanVideoWrapper: structure issue!"; ERRORS=$((ERRORS+1)); }
 
-# Check model weights exist
-AVATAR_FILES=$(find "$LONGCAT_DIR/LongCat-Video-Avatar" -name '*.safetensors' -o -name '*.bin' -o -name '*.pt' 2>/dev/null | wc -l)
-BASE_FILES=$(find "$LONGCAT_DIR/LongCat-Video" -name '*.safetensors' -o -name '*.bin' -o -name '*.pt' 2>/dev/null | wc -l)
-if [ "$AVATAR_FILES" -gt 0 ]; then
-    log "LongCat-Video-Avatar weights: $AVATAR_FILES files ✓"
-else
-    warn "LongCat-Video-Avatar: no model files found!"
-    ERRORS=$((ERRORS + 1))
-fi
-if [ "$BASE_FILES" -gt 0 ]; then
-    log "LongCat-Video base weights: $BASE_FILES files ✓"
-else
-    warn "LongCat-Video base: no model files found!"
-    ERRORS=$((ERRORS + 1))
-fi
+# Avatar single shards (should be 6 files, each >5GB)
+AVATAR_COUNT=$(find "$AVATAR_DIR" -name '*.safetensors' -size +5G 2>/dev/null | wc -l)
+[ "$AVATAR_COUNT" -eq 6 ] && \
+    log "Avatar single: $AVATAR_COUNT/6 shards ✓ ($(du -sh "$AVATAR_DIR" 2>/dev/null | cut -f1))" || \
+    { warn "Avatar single: only $AVATAR_COUNT/6 shards >5GB!"; ERRORS=$((ERRORS+1)); }
 
-# Check Python imports
-if python3 -c "import librosa; import soundfile" 2>/dev/null; then
-    log "Python audio deps: OK ✓"
-else
-    warn "Python audio deps: import failed!"
-    ERRORS=$((ERRORS + 1))
-fi
+# Text encoder (should be 5 files)
+TE_COUNT=$(find "$TE_DIR" -name '*.safetensors' -size +1G 2>/dev/null | wc -l)
+[ "$TE_COUNT" -eq 5 ] && \
+    log "Text encoder: $TE_COUNT/5 shards ✓" || \
+    { warn "Text encoder: only $TE_COUNT/5 shards!"; ERRORS=$((ERRORS+1)); }
 
-# Check ffmpeg
-if command -v ffmpeg &>/dev/null; then
-    log "ffmpeg: installed ✓"
-else
-    warn "ffmpeg: not found!"
-    ERRORS=$((ERRORS + 1))
-fi
+# VAE
+[ -f "$VAE_DIR/diffusion_pytorch_model.safetensors" ] && \
+    log "VAE: OK ✓" || { warn "VAE: missing!"; ERRORS=$((ERRORS+1)); }
 
-# Disk space check
-AVAILABLE_GB=$(df -BG "$MODELS_DIR" | awk 'NR==2 {print $4}' | tr -d 'G')
-if [ "$AVAILABLE_GB" -lt 5 ]; then
-    warn "Low disk space: ${AVAILABLE_GB}GB remaining!"
-fi
+# Audio
+[ -f "$AUDIO_DIR/chinese-wav2vec2-base-fairseq-ckpt.pt" ] && \
+    log "Audio model: OK ✓" || { warn "Audio model: missing!"; ERRORS=$((ERRORS+1)); }
+
+# Python + ffmpeg
+python3 -c "import librosa; import soundfile" 2>/dev/null && log "Python deps: OK ✓" || { warn "Python deps!"; ERRORS=$((ERRORS+1)); }
+command -v ffmpeg &>/dev/null && log "ffmpeg: OK ✓" || { warn "ffmpeg missing!"; ERRORS=$((ERRORS+1)); }
+
+# Disk
+AVAIL=$(df -BG "$MODELS_DIR" | awk 'NR==2{print $4}' | tr -d 'G')
+[ "$AVAIL" -lt 5 ] && warn "Low disk: ${AVAIL}GB free!"
 
 # --- Done ---
 END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 MINUTES=$((ELAPSED / 60))
-SECONDS_LEFT=$((ELAPSED % 60))
+SECS=$((ELAPSED % 60))
+
+TOTAL_SIZE=$(du -sh "$LONGCAT_DIR" 2>/dev/null | cut -f1)
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$ERRORS" -eq 0 ]; then
-    echo -e "  ${GREEN}🐱 Setup complete! All checks passed.${NC} (${MINUTES}m ${SECONDS_LEFT}s)"
+    echo -e "  ${GREEN}🐱 Setup complete! All checks passed.${NC} (${MINUTES}m ${SECS}s)"
 else
-    echo -e "  ${YELLOW}🐱 Setup complete with $ERRORS warning(s).${NC} (${MINUTES}m ${SECONDS_LEFT}s)"
+    echo -e "  ${YELLOW}🐱 Setup done with $ERRORS warning(s).${NC} (${MINUTES}m ${SECS}s)"
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "  ComfyUI path : $COMFYUI_DIR"
-echo "  Model weights: $LONGCAT_DIR"
-echo "  Wrapper      : $WRAPPER_DIR"
+echo "  Downloaded: $TOTAL_SIZE"
+echo "  ComfyUI   : $COMFYUI_DIR"
+echo "  Weights   : $LONGCAT_DIR"
 echo ""
-echo "  Next: Restart ComfyUI, then load a LongCat workflow."
+echo "  → Restart ComfyUI, then load a LongCat Avatar workflow."
 echo ""
 echo "  Tips:"
-echo "    - Audio CFG: 3-5 for best lip sync"
-echo "    - Max ~15s per clip (use continuation for longer)"
-echo "    - Put 'talking' or 'speaking' in your prompts"
+echo "    - Audio CFG 3-5 for best lip sync"
+echo "    - Max ~15s per clip"
+echo "    - Put 'talking' or 'speaking' in prompts"
 echo ""
