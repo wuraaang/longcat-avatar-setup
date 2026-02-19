@@ -10,12 +10,6 @@ set -euo pipefail
 echo "🐱 LongCat Avatar Setup — Starting..."
 START_TIME=$(date +%s)
 
-# --- Config ---
-COMFYUI_DIR="${COMFYUI_DIR:-/workspace/ComfyUI}"
-CUSTOM_NODES_DIR="$COMFYUI_DIR/custom_nodes"
-MODELS_DIR="$COMFYUI_DIR/models"
-HF_MIRROR="${HF_MIRROR:-}"
-
 # --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -26,10 +20,23 @@ log() { echo -e "${GREEN}[✓]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 err() { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 
-# --- Sanity check ---
-if [ ! -d "$COMFYUI_DIR" ]; then
-    err "ComfyUI not found at $COMFYUI_DIR — are you on the RunPod ComfyUI template?"
+# --- Auto-detect ComfyUI path ---
+if [ -n "${COMFYUI_DIR:-}" ]; then
+    : # User override
+elif [ -d "/workspace/madapps/ComfyUI" ]; then
+    COMFYUI_DIR="/workspace/madapps/ComfyUI"    # RunPod official template
+elif [ -d "/workspace/ComfyUI" ]; then
+    COMFYUI_DIR="/workspace/ComfyUI"             # Community templates
+elif [ -d "/root/ComfyUI" ]; then
+    COMFYUI_DIR="/root/ComfyUI"                  # GPUhub / manual install
+else
+    err "ComfyUI not found! Set COMFYUI_DIR manually: COMFYUI_DIR=/path/to/ComfyUI bash setup-runpod.sh"
 fi
+
+CUSTOM_NODES_DIR="$COMFYUI_DIR/custom_nodes"
+MODELS_DIR="$COMFYUI_DIR/models"
+HF_MIRROR="${HF_MIRROR:-}"
+
 log "ComfyUI found at $COMFYUI_DIR"
 
 # --- Step 1: System deps ---
