@@ -159,9 +159,9 @@ download \
     "$MODELS/clip_vision/clip_vision_h.safetensors" \
     "CLIP Vision H (1.26 Go)"
 
-# ── 7. Symlink LoRA + Copie workflows ───────────────────────────────────────
+# ── 7. Symlink LoRA + Copie workflow optimisé ────────────────────────────────
 echo ""
-echo "═══ 7/8  Symlinks et workflows ═══"
+echo "═══ 7/8  Symlinks et workflow ═══"
 
 # Symlink pour compatibilité noms anciens
 if [ -f "$MODELS/loras/LongCat_refinement_lora_rank128_bf16.safetensors" ]; then
@@ -170,11 +170,14 @@ if [ -f "$MODELS/loras/LongCat_refinement_lora_rank128_bf16.safetensors" ]; then
     ok "Symlink LoRA créé"
 fi
 
-# Copie workflows
-if [ -d "$CUSTOM/ComfyUI-WanVideoWrapper/LongCat" ]; then
-    cp "$CUSTOM/ComfyUI-WanVideoWrapper/LongCat/"*.json \
-       "$COMFY/user/default/workflows/LongCat/" 2>/dev/null || true
-    ok "Workflows copiés"
+# Copie workflow optimisé (API format, avec TCFG + FreSca)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/workflow_avatar_api.json" ]; then
+    cp "$SCRIPT_DIR/workflow_avatar_api.json" \
+       "$COMFY/user/default/workflows/LongCat/workflow_avatar_api.json"
+    ok "Workflow API optimisé copié"
+else
+    fail "workflow_avatar_api.json manquant dans le repo"
 fi
 
 # ── 8. Vérification finale ──────────────────────────────────────────────────
@@ -191,6 +194,7 @@ declare -A REQUIRED_FILES=(
     ["wav2vec2"]="$MODELS/wav2vec2/wav2vec2-chinese-base_fp16.safetensors"
     ["MelBandRoFormer"]="$MODELS/diffusion_models/MelBandRoformer_fp32.safetensors"
     ["CLIP Vision H"]="$MODELS/clip_vision/clip_vision_h.safetensors"
+    ["Workflow API"]="$COMFY/user/default/workflows/LongCat/workflow_avatar_api.json"
 )
 
 for name in "${!REQUIRED_FILES[@]}"; do

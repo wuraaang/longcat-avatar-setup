@@ -2,6 +2,9 @@
 """
 LongCat Avatar Pipeline — End-to-end: text + image → lip-synced video.
 
+Uses an embedded API-format workflow (workflow_avatar_api.json) with
+TCFG + FreSca fixes pre-configured. No manual ComfyUI UI setup needed.
+
 Usage:
     python pipeline.py \
         --text "Bienvenue sur ma chaîne YouTube !" \
@@ -9,6 +12,11 @@ Usage:
         --output clip_01.mp4 \
         --ref-voice ma_voix.wav \
         --duration 5
+
+    # Override generation parameters:
+    python pipeline.py \
+        --text "Hello" --image test.png \
+        --steps 20 --shift 10 --block-swap 25 --raag-alpha 0.75
 """
 
 import argparse
@@ -31,15 +39,16 @@ COMFY_INPUT = COMFY_DIR / "input"
 COMFY_TEMP = COMFY_DIR / "temp"
 COMFY_OUTPUT = COMFY_DIR / "output"
 SERVER_ADDRESS = "127.0.0.1:8188"
-WORKFLOW_PATH = COMFY_DIR / "user" / "default" / "workflows" / "LongCat" / "LongCatAvatar_testing_wip.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+WORKFLOW_PATH = SCRIPT_DIR / "workflow_avatar_api.json"
 FPS = 25
 
-# ── Key node IDs in the Avatar workflow (from workflow analysis) ─────────────
+# ── Key node IDs in the Avatar workflow ──────────────────────────────────────
 NODE_IDS = {
     "load_image": "284",
     "load_audio": "125",
     "max_frames": "270",
-    "trim_audio_start": "317",
+    "trim_audio": "317",
     "model_loader": "122",
     "vae_loader": "129",
     "block_swap": "134",
@@ -47,6 +56,11 @@ NODE_IDS = {
     "text_encode": "241",
     "scheduler": "325",
     "sampler_1": "324",
+    "sampler_2": "327",
+    "sampler_3": "456",
+    "torch_compile": "177",
+    "experimental_args": "472",
+    "extra_args": "473",
     "image_resize": "281",
     "video_combine_1": "320",
     "video_combine_2": "386",
@@ -68,7 +82,7 @@ def start_comfyui():
     """Start ComfyUI server in background."""
     print("Starting ComfyUI server...")
     env = os.environ.copy()
-    env.pop("CLAUDECODE", None)  # avoid conflict with Claude Code
+    env.pop("CLAUDECODE", None)
     proc = subprocess.Popen(
         [sys.executable, "main.py", "--listen", "0.0.0.0", "--port", "8188"],
         cwd=str(COMFY_DIR),
@@ -76,7 +90,6 @@ def start_comfyui():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    # Wait for server
     for i in range(120):
         time.sleep(1)
         if is_comfyui_running():
@@ -144,73 +157,57 @@ def get_output_files(prompt_id: str) -> list[dict]:
 # ── Workflow preparation ─────────────────────────────────────────────────────
 
 def load_workflow_api() -> dict:
-    """Load and parse the workflow JSON, extracting the API-format prompt."""
+    """Load the embedded API-format workflow."""
+    if not WORKFLOW_PATH.exists():
+        raise FileNotFoundError(
+            f"Workflow not found: {WORKFLOW_PATH}\n"
+            "Run 'python export_workflow.py' to regenerate it."
+        )
     with open(WORKFLOW_PATH) as f:
-        data = json.load(f)
-
-    # If it's a workflow format (has "nodes" key), we need to convert
-    # If it's already API format (node IDs as keys), use directly
-    if "nodes" in data:
-        return convert_workflow_to_api(data)
-    return data
+        return json.load(f)
 
 
-def convert_workflow_to_api(workflow: dict) -> dict:
-    """Convert ComfyUI workflow format to API prompt format."""
-    api = {}
-    nodes = {str(n["id"]): n for n in workflow["nodes"]}
-    links = {l[0]: l for l in workflow.get("links", [])}
-
-    for node in workflow["nodes"]:
-        node_id = str(node["id"])
-        class_type = node.get("type", "")
-        if not class_type or class_type.startswith("//"):
-            continue
-
-        inputs = {}
-        # Widget values
-        widget_values = node.get("widgets_values", [])
-
-        # Linked inputs
-        if node.get("inputs"):
-            for inp in node["inputs"]:
-                if inp.get("link") is not None:
-                    link_id = inp["link"]
-                    if link_id in links:
-                        link = links[link_id]
-                        from_node = str(link[1])
-                        from_slot = link[2]
-                        inputs[inp["name"]] = [from_node, from_slot]
-
-        api[node_id] = {
-            "class_type": class_type,
-            "inputs": inputs,
-        }
-        if widget_values:
-            api[node_id]["_widget_values"] = widget_values
-
-    return api
-
-
-def configure_workflow(prompt: dict, image_file: str, audio_file: str, max_frames: int) -> dict:
-    """Configure the workflow prompt with our inputs."""
+def configure_workflow(
+    prompt: dict,
+    image_file: str,
+    audio_file: str,
+    max_frames: int,
+    steps: int = 15,
+    shift: float = 8.0,
+    block_swap: int = 20,
+    raag_alpha: float = 0.5,
+) -> dict:
+    """Inject runtime parameters into the API workflow."""
     ids = NODE_IDS
 
-    # Set input image
+    # Input image
     if ids["load_image"] in prompt:
         prompt[ids["load_image"]]["inputs"]["image"] = image_file
 
-    # Set input audio
+    # Input audio
     if ids["load_audio"] in prompt:
         prompt[ids["load_audio"]]["inputs"]["audio"] = audio_file
 
-    # Set max frames
+    # Max frames
     if ids["max_frames"] in prompt:
         prompt[ids["max_frames"]]["inputs"]["value"] = max_frames
 
-    # Configure trim audio (start=0, full duration)
-    if ids["trim_audio_start"] in prompt:
-        prompt[ids["trim_audio_start"]]["inputs"]["start_time"] = 0
+    # Trim audio (start=0, full duration)
+    if ids["trim_audio"] in prompt:
+        prompt[ids["trim_audio"]]["inputs"]["start_index"] = 0
+
+    # Scheduler: steps + shift
+    if ids["scheduler"] in prompt:
+        prompt[ids["scheduler"]]["inputs"]["steps"] = steps
+        prompt[ids["scheduler"]]["inputs"]["shift"] = shift
+
+    # Block swap
+    if ids["block_swap"] in prompt:
+        prompt[ids["block_swap"]]["inputs"]["blocks_to_swap"] = block_swap
+
+    # TCFG + FreSca (experimental_args)
+    if ids["experimental_args"] in prompt:
+        prompt[ids["experimental_args"]]["inputs"]["raag_alpha"] = raag_alpha
 
     return prompt
 
@@ -225,9 +222,14 @@ def run_pipeline(
     duration: float = 5.0,
     skip_tts: bool = False,
     audio_path: str | None = None,
+    steps: int = 15,
+    shift: float = 8.0,
+    block_swap: int = 20,
+    raag_alpha: float = 0.5,
 ):
     print("=" * 60)
     print("  LongCat Avatar Pipeline")
+    print(f"  steps={steps}  shift={shift}  block_swap={block_swap}  raag_alpha={raag_alpha}")
     print("=" * 60)
 
     # ── Step 1: TTS ──────────────────────────────────────────────────────
@@ -241,7 +243,7 @@ def run_pipeline(
         from tts import generate_tts
         wav_path = "/tmp/pipeline_tts.wav"
         _, audio_duration = generate_tts(text, wav_path, ref_voice)
-        duration = audio_duration  # Use actual TTS duration
+        duration = audio_duration
         print(f"  Audio duration: {duration:.1f}s")
 
     # ── Step 2: Copy inputs to ComfyUI ───────────────────────────────────
@@ -251,7 +253,6 @@ def run_pipeline(
     audio_dest = COMFY_INPUT / "pipeline_audio.wav"
     image_dest = COMFY_INPUT / "pipeline_image.png"
 
-    # Convert audio to wav if needed
     if not wav_path.endswith(".wav"):
         subprocess.run(
             ["ffmpeg", "-y", "-i", wav_path, "-ar", "16000", "-ac", "1", str(audio_dest)],
@@ -282,7 +283,16 @@ def run_pipeline(
     client_id = str(uuid.uuid4())
 
     prompt = load_workflow_api()
-    prompt = configure_workflow(prompt, "pipeline_image.png", "pipeline_audio.wav", max_frames)
+    prompt = configure_workflow(
+        prompt,
+        "pipeline_image.png",
+        "pipeline_audio.wav",
+        max_frames,
+        steps=steps,
+        shift=shift,
+        block_swap=block_swap,
+        raag_alpha=raag_alpha,
+    )
 
     ws = websocket.WebSocket()
     ws.connect(f"ws://{SERVER_ADDRESS}/ws?clientId={client_id}")
@@ -314,7 +324,6 @@ def run_pipeline(
             break
 
     if not video_output or not video_output.exists():
-        # Fallback: find most recent video in temp/output
         for search_dir in [COMFY_TEMP, COMFY_OUTPUT]:
             videos = sorted(search_dir.glob("**/*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
             if videos:
@@ -362,6 +371,13 @@ def main():
     parser.add_argument("--duration", type=float, default=5.0, help="Target duration in seconds")
     parser.add_argument("--audio", default=None, help="Pre-generated audio (skip TTS)")
     parser.add_argument("--skip-tts", action="store_true", help="Skip TTS, use --audio instead")
+
+    # Generation tuning parameters
+    parser.add_argument("--steps", type=int, default=15, help="Sampling steps (default: 15)")
+    parser.add_argument("--shift", type=float, default=8.0, help="Scheduler shift (default: 8.0)")
+    parser.add_argument("--block-swap", type=int, default=20, help="Block swap count (default: 20)")
+    parser.add_argument("--raag-alpha", type=float, default=0.5, help="TCFG RAAG alpha (default: 0.5)")
+
     args = parser.parse_args()
 
     if not Path(args.image).exists():
@@ -376,6 +392,10 @@ def main():
         duration=args.duration,
         skip_tts=args.skip_tts,
         audio_path=args.audio,
+        steps=args.steps,
+        shift=args.shift,
+        block_swap=args.block_swap,
+        raag_alpha=args.raag_alpha,
     )
 
 
