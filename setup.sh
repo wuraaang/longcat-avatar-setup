@@ -4,6 +4,9 @@ set -euo pipefail
 # ============================================================================
 # LongCat Avatar YouTube Pipeline — One-Shot Setup
 # Usage: bash setup.sh
+#
+# Installs everything needed: deps, custom nodes, models, optimizations.
+# Designed for RunPod with RTX 4090 (24 Go VRAM).
 # ============================================================================
 
 COMFY="/workspace/runpod-slim/ComfyUI"
@@ -17,7 +20,7 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; }
 
 # ── 1. Nettoyage espace disque ──────────────────────────────────────────────
-echo "═══ 1/8  Nettoyage espace disque ═══"
+echo "═══ 1/9  Nettoyage espace disque ═══"
 if [ -d /root/models/LongCat ]; then
     SIZE=$(du -sh /root/models/LongCat 2>/dev/null | cut -f1)
     echo "Suppression de /root/models/LongCat ($SIZE)..."
@@ -29,7 +32,7 @@ fi
 
 # ── 2. Dépendances système ──────────────────────────────────────────────────
 echo ""
-echo "═══ 2/8  Vérification dépendances système ═══"
+echo "═══ 2/9  Vérification dépendances système ═══"
 for cmd in aria2c ffmpeg python3; do
     if command -v "$cmd" &>/dev/null; then
         ok "$cmd trouvé: $(command -v $cmd)"
@@ -41,21 +44,43 @@ done
 
 # ── 3. Dépendances Python ───────────────────────────────────────────────────
 echo ""
-echo "═══ 3/8  Installation dépendances Python ═══"
+echo "═══ 3/9  Installation dépendances Python ═══"
 pip install -q \
     gguf ftfy accelerate diffusers peft protobuf pyloudnorm \
     librosa soundfile onnxruntime scipy \
     rotary-embedding-torch einops imageio-ffmpeg opencv-python \
     chatterbox-tts \
     websocket-client
-ok "Dépendances Python installées"
+ok "Dépendances Python de base installées"
 
-# Optionnel: sageattention (peut échouer sur certaines configs)
+# ── 4. Optimisations: SageAttention + triton + torch.compile ────────────────
+echo ""
+echo "═══ 4/9  Installation optimisations (SageAttention, triton) ═══"
+
+# SageAttention2 — accélération attention 1.5-2x
+# Nécessite triton pour fonctionner
+pip install -q triton 2>/dev/null && ok "triton installé" || warn "triton non disponible"
 pip install -q sageattention 2>/dev/null && ok "SageAttention installé" || warn "SageAttention non disponible, fallback sdpa"
 
-# ── 4. Custom Nodes ─────────────────────────────────────────────────────────
+# torch.compile — accélération 10-20% via compilation inductor
+# Déjà inclus dans PyTorch >= 2.0, on vérifie juste
+python3 -c "import torch; assert hasattr(torch, 'compile'); print(f'torch.compile OK (PyTorch {torch.__version__})')" 2>/dev/null \
+    && ok "torch.compile disponible" \
+    || warn "torch.compile non disponible (PyTorch < 2.0)"
+
+# NVFP4 — quantification avancée (nécessite CUDA 12.8+ et PyTorch récent)
+python3 -c "
+import torch
+major, minor = torch.cuda.get_device_capability()
+if major >= 8:
+    print(f'GPU compute capability {major}.{minor} — compatible FP8/FP4')
+else:
+    print(f'GPU compute capability {major}.{minor} — FP8 seulement')
+" 2>/dev/null && ok "Vérification GPU OK" || warn "Impossible de vérifier le GPU"
+
+# ── 5. Custom Nodes ─────────────────────────────────────────────────────────
 echo ""
-echo "═══ 4/8  Vérification custom nodes ═══"
+echo "═══ 5/9  Vérification custom nodes ═══"
 
 declare -A NODES=(
     ["ComfyUI-WanVideoWrapper"]="https://github.com/kijai/ComfyUI-WanVideoWrapper.git|longcat_avatar"
@@ -86,18 +111,18 @@ for node in "${!NODES[@]}"; do
     fi
 done
 
-# ── 5. Créer répertoires modèles ────────────────────────────────────────────
+# ── 6. Créer répertoires modèles ────────────────────────────────────────────
 echo ""
-echo "═══ 5/8  Création répertoires modèles ═══"
+echo "═══ 6/9  Création répertoires modèles ═══"
 mkdir -p "$MODELS/diffusion_models/LongCat"
 mkdir -p "$MODELS/wav2vec2"
 mkdir -p "$MODELS/clip_vision"
 mkdir -p "$COMFY/user/default/workflows/LongCat"
 ok "Répertoires créés"
 
-# ── 6. Téléchargement modèles ───────────────────────────────────────────────
+# ── 7. Téléchargement modèles ───────────────────────────────────────────────
 echo ""
-echo "═══ 6/8  Téléchargement modèles ═══"
+echo "═══ 7/9  Téléchargement modèles ═══"
 
 download() {
     local url="$1" dest="$2" name="$3"
@@ -159,9 +184,9 @@ download \
     "$MODELS/clip_vision/clip_vision_h.safetensors" \
     "CLIP Vision H (1.26 Go)"
 
-# ── 7. Symlink LoRA + Copie workflow optimisé ────────────────────────────────
+# ── 8. Symlink LoRA + Copie workflow optimisé ────────────────────────────────
 echo ""
-echo "═══ 7/8  Symlinks et workflow ═══"
+echo "═══ 8/9  Symlinks et workflow ═══"
 
 # Symlink pour compatibilité noms anciens
 if [ -f "$MODELS/loras/LongCat_refinement_lora_rank128_bf16.safetensors" ]; then
@@ -180,9 +205,9 @@ else
     fail "workflow_avatar_api.json manquant dans le repo"
 fi
 
-# ── 8. Vérification finale ──────────────────────────────────────────────────
+# ── 9. Vérification finale ──────────────────────────────────────────────────
 echo ""
-echo "═══ 8/8  Vérification finale ═══"
+echo "═══ 9/9  Vérification finale ═══"
 MISSING=0
 declare -A REQUIRED_FILES=(
     ["Text encoder"]="$MODELS/text_encoders/umt5-xxl-enc-bf16.safetensors"
@@ -206,11 +231,33 @@ for name in "${!REQUIRED_FILES[@]}"; do
     fi
 done
 
+# Résumé optimisations
+echo ""
+echo "── Optimisations disponibles ──"
+python3 -c "
+try:
+    import sageattention
+    print('\033[0;32m[OK]\033[0m SageAttention2 — sélectionner \"sageattn\" dans WanVideo Model Loader')
+except ImportError:
+    print('\033[1;33m[WARN]\033[0m SageAttention non installé — attention mode: sdpa (par défaut)')
+" 2>/dev/null || true
+
+python3 -c "
+import torch
+if hasattr(torch, 'compile'):
+    print('\033[0;32m[OK]\033[0m torch.compile — utiliser le node TorchCompileModel (backend: inductor)')
+else:
+    print('\033[1;33m[WARN]\033[0m torch.compile non disponible')
+" 2>/dev/null || true
+
 echo ""
 if [ $MISSING -eq 0 ]; then
     echo -e "${GREEN}══════════════════════════════════════════${NC}"
     echo -e "${GREEN}  Setup terminé ! Tous les modèles OK.   ${NC}"
     echo -e "${GREEN}══════════════════════════════════════════${NC}"
+    echo ""
+    echo "Prochaine étape:"
+    echo "  python pipeline.py --text \"Bonjour !\" --image personnage.png --output clip.mp4"
 else
     echo -e "${RED}══════════════════════════════════════════${NC}"
     echo -e "${RED}  $MISSING modèle(s) manquant(s)          ${NC}"
